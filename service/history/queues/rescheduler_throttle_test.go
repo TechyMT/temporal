@@ -212,7 +212,9 @@ func TestReschedule_BudgetDeniedWakesInsideControlWindow(t *testing.T) {
 
 	require.Equal(t, 5, r.Len())
 	require.Len(t, gate.updates, 1)
-	require.Equal(t, now.Add(time.Second), gate.updates[0])
+	require.True(t, gate.updates[0].After(now), "a denied class must be woken again")
+	require.False(t, gate.updates[0].After(now.Add(time.Second)),
+		"the wake must land inside the control window that may change the rate")
 }
 
 func TestReschedule_BudgetRetryIntervalOnlyWaitsLonger(t *testing.T) {
@@ -220,17 +222,25 @@ func TestReschedule_BudgetRetryIntervalOnlyWaitsLonger(t *testing.T) {
 		name   string
 		window time.Duration
 		eta    time.Duration
-		want   time.Duration
+		base   time.Duration
 	}{
-		{name: "fallback", window: time.Second, want: 100 * time.Millisecond},
-		{name: "longer estimate", window: time.Second, eta: 400 * time.Millisecond, want: 400 * time.Millisecond},
-		{name: "short estimate", window: time.Second, eta: 40 * time.Millisecond, want: 100 * time.Millisecond},
-		{name: "window cap", window: time.Second, eta: 30 * time.Second, want: time.Second},
+		{name: "fallback", window: time.Second, base: 100 * time.Millisecond},
+		{name: "longer estimate", window: time.Second, eta: 400 * time.Millisecond, base: 400 * time.Millisecond},
+		{name: "short estimate", window: time.Second, eta: 40 * time.Millisecond, base: 100 * time.Millisecond},
+		{name: "window cap", window: time.Second, eta: 30 * time.Second, base: time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			state, _ := newTestThrottleStateWithWindow(defaultThrottleOverrides(), tc.window)
 			r := reschedulerImpl{throttleState: state}
-			require.Equal(t, tc.want, r.budgetRetryInterval(tc.eta))
+
+			seen := make(map[time.Duration]struct{})
+			for i := 0; i < 64; i++ {
+				got := r.budgetRetryInterval(tc.eta)
+				require.GreaterOrEqual(t, got, tc.base/2, "jitter must not halve the wait twice over")
+				require.LessOrEqual(t, got, tc.window, "a blocked class must look again within the window")
+				seen[got] = struct{}{}
+			}
+			require.Greater(t, len(seen), 1, "every shard polling on the same tick is the defect")
 		})
 	}
 }
@@ -267,7 +277,7 @@ func TestReschedule_DisablingControllerDrainsExistingGatedQueues(t *testing.T) {
 	o := defaultThrottleOverrides()
 	o.initialRate = 1
 	state, stateClock := newTestThrottleState(o)
-	state.options.Enabled = func() bool { return enabled }
+	overrideThrottleSetting(state, func(c *dynamicconfig.TaskThrottleControllerSettings) { c.Enabled = enabled })
 
 	now := stateClock.Now()
 	timeSource := clock.NewEventTimeSource()
@@ -389,17 +399,19 @@ func TestReschedule_EnablingTheControllerPacesWorkAlreadyParked(t *testing.T) {
 	timeSource := clock.NewEventTimeSource()
 	timeSource.Update(time.Unix(0, 0))
 	state := NewThrottleState(
-		ThrottleStateOptions{
-			Enabled:       enabled.Load,
-			Beta:          dynamicconfig.GetFloatPropertyFn(0.85),
-			IncreaseRatio: dynamicconfig.GetFloatPropertyFn(0.10),
-			LossThreshold: dynamicconfig.GetFloatPropertyFn(0.05),
-			Window:        dynamicconfig.GetDurationPropertyFn(testThrottleWindow),
-			MaxKeys:       dynamicconfig.GetIntPropertyFn(1024),
-			MinRate:       dynamicconfig.GetFloatPropertyFn(1),
-			MaxRate:       dynamicconfig.GetFloatPropertyFn(10000),
-			InitialRate:   dynamicconfig.GetFloatPropertyFn(1),
-			KeyTTL:        dynamicconfig.GetDurationPropertyFn(5 * time.Minute),
+		func() dynamicconfig.TaskThrottleControllerSettings {
+			return dynamicconfig.TaskThrottleControllerSettings{
+				Enabled:       enabled.Load(),
+				Beta:          0.85,
+				IncreaseRatio: 0.10,
+				LossThreshold: 0.05,
+				Window:        testThrottleWindow,
+				MaxKeys:       1024,
+				MinRate:       1,
+				MaxRate:       10000,
+				InitialRate:   1,
+				KeyTTL:        5 * time.Minute,
+			}
 		},
 		timeSource,
 		log.NewTestLogger(),
@@ -436,17 +448,19 @@ func TestThrottleState_RaisingTheFloorLiftsAClassAlreadyAtIt(t *testing.T) {
 	timeSource := clock.NewEventTimeSource()
 	timeSource.Update(time.Unix(0, 0))
 	state := NewThrottleState(
-		ThrottleStateOptions{
-			Enabled:       dynamicconfig.GetBoolPropertyFn(true),
-			Beta:          dynamicconfig.GetFloatPropertyFn(0.85),
-			IncreaseRatio: dynamicconfig.GetFloatPropertyFn(0.10),
-			LossThreshold: dynamicconfig.GetFloatPropertyFn(0.05),
-			Window:        dynamicconfig.GetDurationPropertyFn(testThrottleWindow),
-			MaxKeys:       dynamicconfig.GetIntPropertyFn(1024),
-			MinRate:       func() float64 { return floor },
-			MaxRate:       dynamicconfig.GetFloatPropertyFn(10000),
-			InitialRate:   dynamicconfig.GetFloatPropertyFn(100),
-			KeyTTL:        dynamicconfig.GetDurationPropertyFn(5 * time.Minute),
+		func() dynamicconfig.TaskThrottleControllerSettings {
+			return dynamicconfig.TaskThrottleControllerSettings{
+				Enabled:       true,
+				Beta:          0.85,
+				IncreaseRatio: 0.10,
+				LossThreshold: 0.05,
+				Window:        testThrottleWindow,
+				MaxKeys:       1024,
+				MinRate:       floor,
+				MaxRate:       10000,
+				InitialRate:   100,
+				KeyTTL:        5 * time.Minute,
+			}
 		},
 		timeSource,
 		log.NewTestLogger(),
@@ -505,17 +519,19 @@ func TestReschedule_UngovernedTasksDoNotWaitOnAnotherClassBudget(t *testing.T) {
 	timeSource := clock.NewEventTimeSource()
 	timeSource.Update(time.Unix(0, 0))
 	state := NewThrottleState(
-		ThrottleStateOptions{
-			Enabled:       enabled.Load,
-			Beta:          dynamicconfig.GetFloatPropertyFn(0.85),
-			IncreaseRatio: dynamicconfig.GetFloatPropertyFn(0.10),
-			LossThreshold: dynamicconfig.GetFloatPropertyFn(0.05),
-			Window:        dynamicconfig.GetDurationPropertyFn(testThrottleWindow),
-			MaxKeys:       dynamicconfig.GetIntPropertyFn(1024),
-			MinRate:       dynamicconfig.GetFloatPropertyFn(1),
-			MaxRate:       dynamicconfig.GetFloatPropertyFn(10000),
-			InitialRate:   dynamicconfig.GetFloatPropertyFn(100),
-			KeyTTL:        dynamicconfig.GetDurationPropertyFn(5 * time.Minute),
+		func() dynamicconfig.TaskThrottleControllerSettings {
+			return dynamicconfig.TaskThrottleControllerSettings{
+				Enabled:       enabled.Load(),
+				Beta:          0.85,
+				IncreaseRatio: 0.10,
+				LossThreshold: 0.05,
+				Window:        testThrottleWindow,
+				MaxKeys:       1024,
+				MinRate:       1,
+				MaxRate:       10000,
+				InitialRate:   100,
+				KeyTTL:        5 * time.Minute,
+			}
 		},
 		timeSource,
 		log.NewTestLogger(),

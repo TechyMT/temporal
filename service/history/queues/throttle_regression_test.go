@@ -11,6 +11,7 @@ import (
 	"go.temporal.io/server/common/dynamicconfig"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/metrics"
+	"go.uber.org/mock/gomock"
 )
 
 func TestThrottleState_FailedSubmitAfterWindowDoesNotIncreaseRate(t *testing.T) {
@@ -207,7 +208,7 @@ func TestThrottleState_IndependentInstancesConvergeOnSharedBudget(t *testing.T) 
 	for i, state := range states {
 		require.True(t, sawIncrease[i], "host %d never increased", i)
 		require.True(t, sawDecrease[i], "host %d never decreased", i)
-		require.Greater(t, throttleRate(state, key), state.options.MinRate(),
+		require.Greater(t, throttleRate(state, key), state.settings().MinRate,
 			"host %d collapsed to the minimum rate", i)
 	}
 }
@@ -255,7 +256,7 @@ func TestThrottleState_BackwardClockDoesNotResetActiveKey(t *testing.T) {
 func TestThrottleState_ThrottledWindowDoesNotIncrease(t *testing.T) {
 	state, timeSource := newTestThrottleState(defaultThrottleOverrides())
 	key := testKey()
-	lossThreshold := state.options.LossThreshold()
+	lossThreshold := state.settings().LossThreshold
 	for i := int64(0); i < minDecisionReleases(lossThreshold); i++ {
 		allowed, metered, _ := state.Admit(key)
 		require.True(t, allowed)
@@ -395,7 +396,7 @@ func TestThrottleState_UnmatchedRejectionsDoNotCutAClassThatIssuedNothing(t *tes
 	key := testKey()
 
 	entry := state.getOrCreate(key)
-	lossThreshold := state.options.LossThreshold()
+	lossThreshold := state.settings().LossThreshold
 	entry.Lock()
 	entry.rejections = minDecisionReleases(lossThreshold) * 5
 	entry.Unlock()
@@ -449,7 +450,7 @@ func TestThrottleState_UnadmittedRejectionsCannotDriveADecision(t *testing.T) {
 	state, timeSource := newTestThrottleState(o)
 	key := testKey()
 
-	lossThreshold := state.options.LossThreshold()
+	lossThreshold := state.settings().LossThreshold
 	samples := minDecisionReleases(lossThreshold)
 	for i := int64(0); i < samples; i++ {
 		require.True(t, admitOK(state, key))
@@ -470,17 +471,19 @@ func TestThrottleState_RejectionSurvivesTheFlagGoingOff(t *testing.T) {
 	timeSource := clock.NewEventTimeSource()
 	timeSource.Update(time.Unix(0, 0))
 	state := NewThrottleState(
-		ThrottleStateOptions{
-			Enabled:       func() bool { return enabled },
-			Beta:          dynamicconfig.GetFloatPropertyFn(0.85),
-			IncreaseRatio: dynamicconfig.GetFloatPropertyFn(0.10),
-			LossThreshold: dynamicconfig.GetFloatPropertyFn(0.05),
-			Window:        dynamicconfig.GetDurationPropertyFn(testThrottleWindow),
-			MaxKeys:       dynamicconfig.GetIntPropertyFn(1024),
-			MinRate:       dynamicconfig.GetFloatPropertyFn(1),
-			MaxRate:       dynamicconfig.GetFloatPropertyFn(10000),
-			InitialRate:   dynamicconfig.GetFloatPropertyFn(100),
-			KeyTTL:        dynamicconfig.GetDurationPropertyFn(5 * time.Minute),
+		func() dynamicconfig.TaskThrottleControllerSettings {
+			return dynamicconfig.TaskThrottleControllerSettings{
+				Enabled:       enabled,
+				Beta:          0.85,
+				IncreaseRatio: 0.10,
+				LossThreshold: 0.05,
+				Window:        testThrottleWindow,
+				MaxKeys:       1024,
+				MinRate:       1,
+				MaxRate:       10000,
+				InitialRate:   100,
+				KeyTTL:        5 * time.Minute,
+			}
 		},
 		timeSource,
 		log.NewTestLogger(),
@@ -488,7 +491,7 @@ func TestThrottleState_RejectionSurvivesTheFlagGoingOff(t *testing.T) {
 	)
 	key := testKey()
 
-	lossThreshold := state.options.LossThreshold()
+	lossThreshold := state.settings().LossThreshold
 	samples := minDecisionReleases(lossThreshold)
 	for i := int64(0); i < samples; i++ {
 		allowed, _, _ := state.Admit(key)
@@ -530,7 +533,7 @@ func TestThrottleState_LossExactlyAtTheThresholdDoesNotDecrease(t *testing.T) {
 	key := testKey()
 
 	// 1 rejection in 20 releases is exactly the 5% threshold.
-	lossThreshold := state.options.LossThreshold()
+	lossThreshold := state.settings().LossThreshold
 	samples := minDecisionReleases(lossThreshold)
 	for i := int64(0); i < samples; i++ {
 		require.True(t, admitOK(state, key))
@@ -631,17 +634,19 @@ func TestThrottleState_CeilingIsLive(t *testing.T) {
 	timeSource := clock.NewEventTimeSource()
 	timeSource.Update(time.Unix(0, 0))
 	state := NewThrottleState(
-		ThrottleStateOptions{
-			Enabled:       dynamicconfig.GetBoolPropertyFn(true),
-			Beta:          dynamicconfig.GetFloatPropertyFn(0.85),
-			IncreaseRatio: dynamicconfig.GetFloatPropertyFn(0.10),
-			LossThreshold: dynamicconfig.GetFloatPropertyFn(0.05),
-			Window:        dynamicconfig.GetDurationPropertyFn(testThrottleWindow),
-			MaxKeys:       dynamicconfig.GetIntPropertyFn(1024),
-			MinRate:       dynamicconfig.GetFloatPropertyFn(1),
-			MaxRate:       func() float64 { return ceiling },
-			InitialRate:   dynamicconfig.GetFloatPropertyFn(100),
-			KeyTTL:        dynamicconfig.GetDurationPropertyFn(5 * time.Minute),
+		func() dynamicconfig.TaskThrottleControllerSettings {
+			return dynamicconfig.TaskThrottleControllerSettings{
+				Enabled:       true,
+				Beta:          0.85,
+				IncreaseRatio: 0.10,
+				LossThreshold: 0.05,
+				Window:        testThrottleWindow,
+				MaxKeys:       1024,
+				MinRate:       1,
+				MaxRate:       ceiling,
+				InitialRate:   100,
+				KeyTTL:        5 * time.Minute,
+			}
 		},
 		timeSource,
 		log.NewTestLogger(),
@@ -663,13 +668,17 @@ func TestThrottleState_CeilingIsLive(t *testing.T) {
 }
 
 // A release refused by anything but the governed budgets must not change the rate. Counting
-// it inflates the ratio by 1/(1 - contention) and drives a healthy class to the floor.
+// it inflates the ratio by 1/(1 - contention) and drives a healthy class to the floor. The
+// contended dispatches go through the real classification path, so deleting the cause filter
+// in reportThrottle fails this.
 func TestThrottleState_FailuresOutsideTheBudgetDoNotSlowTheClass(t *testing.T) {
-	settle := func(contention int) float64 {
+	settle := func(t *testing.T, contention int) float64 {
+		ctrl := gomock.NewController(t)
 		o := defaultThrottleOverrides()
 		o.initialRate = 200
 		state, timeSource := newTestThrottleState(o)
 		key := testKey()
+		locked := newThrottleTestExecutable(ctrl, state)
 
 		issued := 0
 		for w := 0; w < 120; w++ {
@@ -679,20 +688,26 @@ func TestThrottleState_FailuresOutsideTheBudgetDoNotSlowTheClass(t *testing.T) {
 					break
 				}
 				issued++
-				if issued%50 == 0 {
+				switch {
+				case issued%50 == 0:
 					state.ReportThrottled(key, metered) // 2% budget loss, under the threshold
+				case issued%100 < contention:
+					// Failed on a workflow lock, holding a release this class issued.
+					locked.throttleKey, locked.throttleAdmitted = key, metered
+					locked.reportThrottle(
+						enumspb.RESOURCE_EXHAUSTED_CAUSE_BUSY_WORKFLOW,
+						enumspb.RESOURCE_EXHAUSTED_SCOPE_NAMESPACE,
+					)
 				}
-				// The other issued%100 < contention dispatches fail on a workflow lock. The
-				// controller is told nothing about them, which is the whole point.
 			}
 			closeWindow(state, timeSource, key)
 		}
 		return throttleRate(state, key)
 	}
 
-	quiet := settle(0)
+	quiet := settle(t, 0)
 	for _, contention := range []int{50, 80, 95} {
-		require.InEpsilon(t, quiet, settle(contention), 1e-9,
+		require.InEpsilon(t, quiet, settle(t, contention), 1e-9,
 			"%d%% lock contention must not change the rate; only the budget decides it", contention)
 	}
 }
@@ -702,7 +717,7 @@ func TestThrottleState_FailuresOutsideTheBudgetDoNotSlowTheClass(t *testing.T) {
 func TestThrottleState_NaNGainCannotPoisonTheRate(t *testing.T) {
 	o := defaultThrottleOverrides()
 	state, timeSource := newTestThrottleState(o)
-	state.options.IncreaseRatio = func() float64 { return math.NaN() }
+	overrideThrottleSetting(state, func(c *dynamicconfig.TaskThrottleControllerSettings) { c.IncreaseRatio = math.NaN() })
 	key := testKey()
 
 	cleanWindow(state, key)
@@ -711,4 +726,25 @@ func TestThrottleState_NaNGainCannotPoisonTheRate(t *testing.T) {
 	rate := throttleRate(state, key)
 	require.False(t, math.IsNaN(rate), "a NaN gain must not reach the rate")
 	require.InEpsilon(t, o.minRate, rate, 1e-9, "clamp sends a NaN rate to the floor")
+}
+
+// A zero floor would let a class decay until it can no longer earn the releases a decision
+// needs, stalling it for good while the rescheduler keeps polling the gate.
+func TestThrottleState_ZeroFloorCannotStallAClass(t *testing.T) {
+	o := defaultThrottleOverrides()
+	o.minRate = 0
+	o.initialRate = 2
+	state, timeSource := newTestThrottleState(o)
+	key := testKey()
+
+	// Far past the point a 0.85 decay would otherwise reach zero.
+	for w := 0; w < 200; w++ {
+		reportThrottle(state, key, true)
+		closeWindow(state, timeSource, key)
+	}
+
+	rate := throttleRate(state, key)
+	require.GreaterOrEqual(t, rate, minThrottleRate,
+		"a configured floor below one release per second must not be honoured")
+	require.True(t, admitOK(state, key), "a floored class must still release")
 }

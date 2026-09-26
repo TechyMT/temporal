@@ -2086,61 +2086,13 @@ The actual count is calculated as base * (multiplier ^ level)`,
 The actual count is calculated as base * (multiplier ^ level)`,
 	)
 
-	TaskThrottleControllerEnabled = NewGlobalBoolSetting(
-		"history.taskThrottleControllerEnabled",
-		false,
-		`Enables host-level pacing of history task retries after namespace APS or persistence throttling.`,
-	)
-	TaskThrottleControllerMinRate = NewGlobalFloatSetting(
-		"history.taskThrottleControllerMinRate",
-		1.0,
-		`Floor on a class's admitted rate, in task releases per second. A class driven here by a
-long incident climbs back multiplicatively, so raising the floor is the lever for shortening
-that recovery.`,
-	)
-	TaskThrottleControllerInitialRate = NewGlobalFloatSetting(
-		"history.taskThrottleControllerInitialRate",
-		1000.0,
-		`Admitted rate a class starts at, and returns to when it is reset after going idle.`,
-	)
-	TaskThrottleControllerMaxRate = NewGlobalFloatSetting(
-		"history.taskThrottleControllerMaxRate",
-		10000.0,
-		`Ceiling on a class's admitted rate, in task releases per second. It also bounds the
-burst, which is one control window's worth of credit, so lowering it limits what a class that
-has been idle can spend the moment demand returns.`,
-	)
-	TaskThrottleControllerKeyTTL = NewGlobalDurationSetting(
-		"history.taskThrottleControllerKeyTTL",
-		5*time.Minute,
-		`How long a throttle class survives without being touched. On expiry it is evicted, or
-reset to the initial rate if it is touched again first, so a rate learned during an incident
-does not outlive it.`,
-	)
-	TaskThrottleControllerBeta = NewGlobalFloatSetting(
-		"history.taskThrottleControllerBeta",
-		0.85,
-		`Multiplicative rate decrease applied after a control window exceeds the loss threshold.`,
-	)
-	TaskThrottleControllerIncreaseRatio = NewGlobalFloatSetting(
-		"history.taskThrottleControllerIncreaseRatio",
-		0.10,
-		`Fraction by which the admitted rate increases after a control window stays within the loss threshold.`,
-	)
-	TaskThrottleControllerLossThreshold = NewGlobalFloatSetting(
-		"history.taskThrottleControllerLossThreshold",
-		0.05,
-		`Fraction of admitted releases that may be throttled before the admitted rate decreases.`,
-	)
-	TaskThrottleControllerWindow = NewGlobalDurationSetting(
-		"history.taskThrottleControllerWindow",
-		time.Second,
-		`Control window used to evaluate throttling loss and update the admitted rate.`,
-	)
-	TaskThrottleControllerMaxKeys = NewGlobalIntSetting(
-		"history.taskThrottleControllerMaxKeys",
-		1024,
-		`Maximum number of throttle classes tracked by a history host.`,
+	TaskThrottleController = NewGlobalTypedSetting(
+		"history.taskThrottleController",
+		DefaultTaskThrottleControllerSettings,
+		`TaskThrottleController tunes host level pacing of history task retries that a namespace
+APS or persistence rate limiter refused. Unset fields keep their defaults.
+Fields: Enabled, MinRate, MaxRate, InitialRate, KeyTTL, Beta, IncreaseRatio, LossThreshold,
+Window, MaxKeys. See TaskThrottleControllerSettings comments for details.`,
 	)
 
 	TaskSchedulerEnableRateLimiter = NewGlobalBoolSetting(

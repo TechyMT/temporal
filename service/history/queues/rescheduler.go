@@ -27,6 +27,8 @@ const (
 
 	reschedulerPQCleanupDuration          = 3 * time.Minute
 	reschedulerPQCleanupJitterCoefficient = 0.15
+
+	budgetRetryJitterCoefficient = 0.5
 )
 
 type (
@@ -89,7 +91,7 @@ func NewRescheduler(
 	metricsHandler metrics.Handler,
 	throttleState *ThrottleState,
 ) *reschedulerImpl {
-	r := &reschedulerImpl{
+	return &reschedulerImpl{
 		scheduler:      scheduler,
 		timeSource:     timeSource,
 		logger:         logger,
@@ -104,7 +106,6 @@ func NewRescheduler(
 
 		pqMap: make(map[reschedulerKey]collection.Queue[rescheduledExecuable]),
 	}
-	return r
 }
 
 func (r *reschedulerImpl) Start() {
@@ -242,14 +243,10 @@ func (r *reschedulerImpl) reschedule() {
 	metrics.TaskReschedulerPendingTasks.With(r.metricsHandler).Record(int64(r.numExecutables))
 	pass := reschedulePass{now: r.timeSource.Now()}
 
-	n := len(r.keyOrder)
 	for _, key := range r.visitOrderLocked() {
 		if pq, ok := r.pqMap[key]; ok && !pq.IsEmpty() {
 			r.drainClassLocked(key, pq, &pass)
 		}
-	}
-	if n > 0 {
-		r.rrCursor = (r.rrCursor + 1) % n
 	}
 
 	if !pass.nextWake.IsZero() {
@@ -262,6 +259,9 @@ func (r *reschedulerImpl) visitOrderLocked() []reschedulerKey {
 	r.visitOrder = r.visitOrder[:0]
 	for i := 0; i < n; i++ {
 		r.visitOrder = append(r.visitOrder, r.keyOrder[(r.rrCursor+i)%n])
+	}
+	if n > 0 {
+		r.rrCursor = (r.rrCursor + 1) % n
 	}
 	// Lower Priority sorts first. Stable, so the rotation still breaks ties within one priority.
 	slices.SortStableFunc(r.visitOrder, func(a, b reschedulerKey) int {
@@ -321,13 +321,17 @@ func (r *reschedulerImpl) drainClassLocked(
 	}
 }
 
-// The floor stops every shard polling at the bucket's refill rate.
+// The floor stops every shard polling at the bucket's refill rate, and the jitter stops them
+// all polling on the same tick.
 func (r *reschedulerImpl) budgetRetryInterval(eta time.Duration) time.Duration {
 	const budgetRetryDivisor = 10
 
-	window := r.throttleState.Window()
+	window := r.throttleState.settings().Window
 	interval := min(max(eta, window/budgetRetryDivisor), window)
-	return max(interval, time.Millisecond)
+	// Re-capped after jittering: a blocked class still has to look again within the window
+	// that may have changed its rate.
+	jittered := min(backoff.Jitter(interval, budgetRetryJitterCoefficient), window)
+	return max(jittered, time.Millisecond)
 }
 
 func (r *reschedulerImpl) classTags(key reschedulerKey) []metrics.Tag {

@@ -817,7 +817,7 @@ func (e *executableImpl) shouldResubmitOnNack(err error) bool {
 	if !errors.Is(err, consts.ErrResourceExhaustedBusyWorkflow) && common.IsResourceExhausted(err) {
 		// Resubmitting synchronously bypasses the rescheduler, and with it the gate, so every
 		// parked task would keep rediscovering the same constraint at full dispatch cost.
-		if e.throttleState != nil && e.throttleState.Enabled() && e.throttleKey != (ThrottleKey{}) {
+		if e.throttleState.Enabled() && e.throttleKey != (ThrottleKey{}) {
 			return false
 		}
 		if e.resourceExhaustedCount > resourceExhaustedResubmitMaxAttempts {

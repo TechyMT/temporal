@@ -12,7 +12,13 @@ import (
 	"go.temporal.io/server/common/metrics"
 )
 
-const throttleSweepDivisor = 4
+const (
+	throttleSweepDivisor = 4
+
+	// A class below one release per second cannot earn the releases a decision needs, so it
+	// would never climb back. Recovery is only bounded if the floor is.
+	minThrottleRate = 1.0
+)
 
 type (
 	// ThrottleKey is one bucket per budget. Priority is deliberately not part of it: the
@@ -22,21 +28,8 @@ type (
 		NamespaceID string
 	}
 
-	ThrottleStateOptions struct {
-		Enabled       dynamicconfig.BoolPropertyFn
-		MinRate       dynamicconfig.FloatPropertyFn
-		MaxRate       dynamicconfig.FloatPropertyFn
-		InitialRate   dynamicconfig.FloatPropertyFn
-		KeyTTL        dynamicconfig.DurationPropertyFn
-		Beta          dynamicconfig.FloatPropertyFn
-		IncreaseRatio dynamicconfig.FloatPropertyFn
-		LossThreshold dynamicconfig.FloatPropertyFn
-		Window        dynamicconfig.DurationPropertyFn
-		MaxKeys       dynamicconfig.IntPropertyFn
-	}
-
 	ThrottleState struct {
-		options        ThrottleStateOptions
+		settings       dynamicconfig.TypedPropertyFn[dynamicconfig.TaskThrottleControllerSettings]
 		timeSource     clock.TimeSource
 		logger         log.Logger
 		metricsHandler metrics.Handler
@@ -62,13 +55,13 @@ type (
 )
 
 func NewThrottleState(
-	options ThrottleStateOptions,
+	settings dynamicconfig.TypedPropertyFn[dynamicconfig.TaskThrottleControllerSettings],
 	timeSource clock.TimeSource,
 	logger log.Logger,
 	metricsHandler metrics.Handler,
 ) *ThrottleState {
 	s := &ThrottleState{
-		options:        options,
+		settings:       settings,
 		timeSource:     timeSource,
 		logger:         logger,
 		metricsHandler: metricsHandler,
@@ -106,11 +99,7 @@ func (k ThrottleKey) cappedTags() []metrics.Tag {
 }
 
 func (s *ThrottleState) Enabled() bool {
-	return s != nil && s.options.Enabled()
-}
-
-func (s *ThrottleState) Window() time.Duration {
-	return s.options.Window()
+	return s != nil && s.settings().Enabled
 }
 
 func (s *ThrottleState) Admit(key ThrottleKey) (allowed, metered bool, retryAfter time.Duration) {
@@ -124,7 +113,7 @@ func (s *ThrottleState) Admit(key ThrottleKey) (allowed, metered bool, retryAfte
 	}
 
 	now := s.timeSource.Now()
-	window := s.Window()
+	window := s.settings().Window
 	entry.Lock()
 	defer entry.Unlock()
 
@@ -154,7 +143,7 @@ func (s *ThrottleState) Return(key ThrottleKey) {
 	entry.Lock()
 	defer entry.Unlock()
 
-	entry.tokens = min(entry.tokens+1, entry.burstLocked(s.Window()))
+	entry.tokens = min(entry.tokens+1, entry.burstLocked(s.settings().Window))
 	if entry.releases > 0 {
 		entry.releases--
 	}
@@ -178,7 +167,7 @@ func (s *ThrottleState) ReportThrottled(key ThrottleKey, metered bool) {
 	metrics.TaskThrottleRejections.With(s.metricsHandler).Record(1, key.metricsTags()...)
 
 	now := s.timeSource.Now()
-	window := s.Window()
+	window := s.settings().Window
 	entry.Lock()
 	defer entry.Unlock()
 
@@ -209,7 +198,7 @@ func (s *ThrottleState) advanceWindowLocked(entry *throttleEntry, now time.Time,
 	entry.windowStart = now
 
 	// Read once: the evidence gate and the comparison below must use the same threshold.
-	lossThreshold := s.options.LossThreshold()
+	lossThreshold := s.settings().LossThreshold
 	if entry.releases < minDecisionReleases(lossThreshold) {
 		return
 	}
@@ -221,12 +210,12 @@ func (s *ThrottleState) advanceWindowLocked(entry *throttleEntry, now time.Time,
 	loss := float64(entry.rejections) / float64(entry.releases)
 	switch {
 	case loss > lossThreshold:
-		entry.rate = s.clamp(entry.rate * s.options.Beta())
+		entry.rate = s.clamp(entry.rate * s.settings().Beta)
 		// Tokens banked at the old rate would let the class overshoot the new one.
 		entry.tokens = min(entry.tokens, entry.burstLocked(window))
 		metrics.TaskThrottleRateDecreases.With(s.metricsHandler).Record(1, entry.key.metricsTags()...)
 	case entry.suppressions > 0:
-		entry.rate = s.clamp(entry.rate * (1 + s.options.IncreaseRatio()))
+		entry.rate = s.clamp(entry.rate * (1 + s.settings().IncreaseRatio))
 		metrics.TaskThrottleRateIncreases.With(s.metricsHandler).Record(1, entry.key.metricsTags()...)
 	default:
 		// Never refused, so it has not asked for more. Raising it would grow the burst.
@@ -244,8 +233,8 @@ func (e *throttleEntry) resetLocked(rate float64, now time.Time, window time.Dur
 }
 
 func (s *ThrottleState) touchLocked(entry *throttleEntry, now time.Time, window time.Duration) {
-	if !entry.lastAccess.IsZero() && now.Sub(entry.lastAccess) > s.options.KeyTTL() {
-		entry.resetLocked(s.clamp(s.options.InitialRate()), now, window)
+	if !entry.lastAccess.IsZero() && now.Sub(entry.lastAccess) > s.settings().KeyTTL {
+		entry.resetLocked(s.clamp(s.settings().InitialRate), now, window)
 	}
 	// A backwards clock step must not make an active entry look idle.
 	if now.After(entry.lastAccess) {
@@ -279,10 +268,11 @@ func (e *throttleEntry) tokenETALocked() time.Duration {
 }
 
 func (s *ThrottleState) clamp(rate float64) float64 {
+	floor := max(s.settings().MinRate, minThrottleRate)
 	if math.IsNaN(rate) {
-		return s.options.MinRate()
+		return floor
 	}
-	return min(max(rate, s.options.MinRate()), s.options.MaxRate())
+	return min(max(rate, floor), s.settings().MaxRate)
 }
 
 func (s *ThrottleState) peek(key ThrottleKey) *throttleEntry {
@@ -304,7 +294,7 @@ func (s *ThrottleState) getOrCreate(key ThrottleKey) *throttleEntry {
 
 	now := s.timeSource.Now()
 	s.maybeSweepLocked(now)
-	if len(s.entries) >= s.options.MaxKeys() {
+	if len(s.entries) >= s.settings().MaxKeys {
 		// Fail open past the cap; the metric is the signal, a log here would storm.
 		metrics.TaskThrottleKeysDropped.With(s.metricsHandler).Record(1, key.cappedTags()...)
 		return nil
@@ -312,26 +302,26 @@ func (s *ThrottleState) getOrCreate(key ThrottleKey) *throttleEntry {
 
 	entry := &throttleEntry{
 		key:         key,
-		rate:        s.clamp(s.options.InitialRate()),
+		rate:        s.clamp(s.settings().InitialRate),
 		lastRefill:  now,
 		windowStart: now,
 		lastAccess:  now,
 	}
-	entry.tokens = entry.burstLocked(s.Window())
+	entry.tokens = entry.burstLocked(s.settings().Window)
 	s.entries[key] = entry
 	metrics.TaskThrottleKeysTracked.With(s.metricsHandler).Record(float64(len(s.entries)))
 	return entry
 }
 
 func (s *ThrottleState) maybeSweepLocked(now time.Time) {
-	if now.Sub(s.lastSweep) < s.options.KeyTTL()/throttleSweepDivisor {
+	if now.Sub(s.lastSweep) < s.settings().KeyTTL/throttleSweepDivisor {
 		return
 	}
 	s.lastSweep = now
 	evicted := false
 	for key, entry := range s.entries {
 		entry.Lock()
-		idle := now.Sub(entry.lastAccess) > s.options.KeyTTL()
+		idle := now.Sub(entry.lastAccess) > s.settings().KeyTTL
 		entry.Unlock()
 		if idle {
 			delete(s.entries, key)

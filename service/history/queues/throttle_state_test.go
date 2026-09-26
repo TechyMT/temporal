@@ -52,24 +52,39 @@ func newTestThrottleStateWithWindow(
 ) (*ThrottleState, *clock.EventTimeSource) {
 	timeSource := clock.NewEventTimeSource()
 	timeSource.Update(time.Unix(0, 0))
+	settings := dynamicconfig.TaskThrottleControllerSettings{
+		Enabled:       o.enabled,
+		Beta:          o.beta,
+		IncreaseRatio: o.increase,
+		LossThreshold: o.lossThresh,
+		Window:        window,
+		MinRate:       o.minRate,
+		MaxRate:       o.maxRate,
+		InitialRate:   o.initialRate,
+		MaxKeys:       o.maxKeys,
+		KeyTTL:        o.keyTTL,
+	}
 	state := NewThrottleState(
-		ThrottleStateOptions{
-			Enabled:       dynamicconfig.GetBoolPropertyFn(o.enabled),
-			Beta:          dynamicconfig.GetFloatPropertyFn(o.beta),
-			IncreaseRatio: dynamicconfig.GetFloatPropertyFn(o.increase),
-			LossThreshold: dynamicconfig.GetFloatPropertyFn(o.lossThresh),
-			Window:        dynamicconfig.GetDurationPropertyFn(window),
-			MinRate:       dynamicconfig.GetFloatPropertyFn(o.minRate),
-			MaxRate:       dynamicconfig.GetFloatPropertyFn(o.maxRate),
-			InitialRate:   dynamicconfig.GetFloatPropertyFn(o.initialRate),
-			MaxKeys:       dynamicconfig.GetIntPropertyFn(o.maxKeys),
-			KeyTTL:        dynamicconfig.GetDurationPropertyFn(o.keyTTL),
-		},
+		func() dynamicconfig.TaskThrottleControllerSettings { return settings },
 		timeSource,
 		log.NewTestLogger(),
 		metrics.NoopMetricsHandler,
 	)
 	return state, timeSource
+}
+
+// overrideThrottleSetting re-applies mutate on every read, so a test can keep changing the
+// value it closes over.
+func overrideThrottleSetting(
+	state *ThrottleState,
+	mutate func(*dynamicconfig.TaskThrottleControllerSettings),
+) {
+	base := state.settings()
+	state.settings = func() dynamicconfig.TaskThrottleControllerSettings {
+		cfg := base
+		mutate(&cfg)
+		return cfg
+	}
 }
 
 func TestIsControllerInput(t *testing.T) {
@@ -135,12 +150,6 @@ func admitOK(c *ThrottleState, key ThrottleKey) bool {
 	return allowed
 }
 
-// reportThrottle feeds rejections in for one control decision. A decision needs a sample the
-// loss ratio can resolve, so the admitted form supplies the releases the rejections are
-// measured against: one call is one window of total loss.
-// reportThrottle drives one decision's worth of total loss through the real admission path:
-// enough metered releases for the ratio to resolve the threshold, every one of them refused.
-// The unadmitted form reports a rejection the gate never issued, which must stay inert.
 // One decision's worth of total loss. Plants the sample rather than admitting, so tests about
 // the decision keep their bucket; the admission path is covered by admitOK and admitAndReject.
 func reportThrottle(c *ThrottleState, key ThrottleKey, admitted bool) {
@@ -153,7 +162,7 @@ func reportThrottle(c *ThrottleState, key ThrottleKey, admitted bool) {
 		c.ReportThrottled(key, false)
 		return
 	}
-	lossThreshold := c.options.LossThreshold()
+	lossThreshold := c.settings().LossThreshold
 	samples := minDecisionReleases(lossThreshold)
 	entry.Lock()
 	entry.releases += samples
@@ -197,8 +206,8 @@ func closeWindow(state *ThrottleState, ts *clock.EventTimeSource, key ThrottleKe
 	}
 	entry.Lock()
 	defer entry.Unlock()
-	state.touchLocked(entry, ts.Now(), state.Window())
-	state.advanceWindowLocked(entry, ts.Now(), state.Window())
+	state.touchLocked(entry, ts.Now(), state.settings().Window)
+	state.advanceWindowLocked(entry, ts.Now(), state.settings().Window)
 }
 
 func throttleRate(state *ThrottleState, key ThrottleKey) float64 {
@@ -245,7 +254,7 @@ func TestThrottleState_DecreasesAcrossWindows(t *testing.T) {
 func TestThrottleState_ControlLawUpdatesAreLive(t *testing.T) {
 	beta := 0.5
 	state, timeSource := newTestThrottleState(defaultThrottleOverrides())
-	state.options.Beta = func() float64 { return beta }
+	overrideThrottleSetting(state, func(c *dynamicconfig.TaskThrottleControllerSettings) { c.Beta = beta })
 	key := testKey()
 
 	reportThrottle(state, key, true)

@@ -112,18 +112,7 @@ func ThrottleStateProvider(
 	metricsHandler metrics.Handler,
 ) *queues.ThrottleState {
 	return queues.NewThrottleState(
-		queues.ThrottleStateOptions{
-			Enabled:       config.TaskThrottleControllerEnabled,
-			MinRate:       config.TaskThrottleControllerMinRate,
-			MaxRate:       config.TaskThrottleControllerMaxRate,
-			InitialRate:   config.TaskThrottleControllerInitialRate,
-			KeyTTL:        config.TaskThrottleControllerKeyTTL,
-			Beta:          config.TaskThrottleControllerBeta,
-			IncreaseRatio: config.TaskThrottleControllerIncreaseRatio,
-			LossThreshold: config.TaskThrottleControllerLossThreshold,
-			Window:        config.TaskThrottleControllerWindow,
-			MaxKeys:       config.TaskThrottleControllerMaxKeys,
-		},
+		config.TaskThrottleController,
 		timeSource,
 		logger,
 		metricsHandler,
