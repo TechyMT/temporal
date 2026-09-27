@@ -108,13 +108,11 @@ var QueueModule = fx.Options(
 func ThrottleStateProvider(
 	config *configs.Config,
 	timeSource clock.TimeSource,
-	logger log.SnTaggedLogger,
 	metricsHandler metrics.Handler,
 ) *queues.ThrottleState {
 	return queues.NewThrottleState(
 		config.TaskThrottleController,
 		timeSource,
-		logger,
 		metricsHandler,
 	)
 }

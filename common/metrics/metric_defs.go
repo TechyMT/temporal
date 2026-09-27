@@ -945,14 +945,10 @@ var (
 		"chasm_request_id_evicted",
 		WithDescription("The number of CHASM-attached request IDs swept from an execution's dedup map for exceeding history.maximumRequestIDsPerExecution or history.requestIDMaxAge."),
 	)
-	TaskScheduleToStartLatency     = NewTimerDef("task_schedule_to_start_latency")
-	TaskBatchCompleteCounter       = NewCounterDef("task_batch_complete_counter")
-	TaskReschedulerPendingTasks    = NewDimensionlessHistogramDef("task_rescheduler_pending_tasks")
-	TaskReschedulerClassQueueDepth = NewDimensionlessHistogramDef(
-		"task_rescheduler_class_queue_depth",
-		WithDescription("The number of task executables parked in one rescheduler class queue."),
-	)
-	TaskThrottleGateAdmitted = NewCounterDef(
+	TaskScheduleToStartLatency  = NewTimerDef("task_schedule_to_start_latency")
+	TaskBatchCompleteCounter    = NewCounterDef("task_batch_complete_counter")
+	TaskReschedulerPendingTasks = NewDimensionlessHistogramDef("task_rescheduler_pending_tasks")
+	TaskThrottleGateAdmitted    = NewCounterDef(
 		"task_throttle_gate_admitted",
 		WithDescription("The number of task releases admitted by the throttle controller gate."),
 	)
@@ -968,25 +964,9 @@ var (
 		"task_throttle_admitted_rate",
 		WithDescription("The current admitted rate, in task releases per second, for one throttle controller key."),
 	)
-	TaskThrottleRateDecreases = NewCounterDef(
-		"task_throttle_rate_decreases",
-		WithDescription("The number of multiplicative rate decreases applied by the throttle controller."),
-	)
-	TaskThrottleRateIncreases = NewCounterDef(
-		"task_throttle_rate_increases",
-		WithDescription("The number of rate increases applied by the throttle controller."),
-	)
 	TaskThrottleKeysTracked = NewGaugeDef(
 		"task_throttle_keys_tracked",
 		WithDescription("The number of keys tracked by the throttle controller."),
-	)
-	TaskThrottleKeysEvicted = NewCounterDef(
-		"task_throttle_keys_evicted",
-		WithDescription("The number of throttle controller keys evicted after becoming idle."),
-	)
-	TaskThrottleKeysDropped = NewCounterDef(
-		"task_throttle_keys_dropped",
-		WithDescription("The number of times the throttle controller failed open because a scope map was at its key cap."),
 	)
 	PendingTasksCounter = NewDimensionlessHistogramDef(
 		"pending_tasks",

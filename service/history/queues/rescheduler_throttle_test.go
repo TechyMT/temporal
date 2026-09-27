@@ -407,7 +407,6 @@ func TestReschedule_EnablingTheControllerPacesWorkAlreadyParked(t *testing.T) {
 			}
 		},
 		timeSource,
-		log.NewTestLogger(),
 		metrics.NoopMetricsHandler,
 	)
 
@@ -456,7 +455,6 @@ func TestThrottleState_RaisingTheFloorLiftsAClassAlreadyAtIt(t *testing.T) {
 			}
 		},
 		timeSource,
-		log.NewTestLogger(),
 		metrics.NoopMetricsHandler,
 	)
 	key := testKey()
@@ -522,7 +520,6 @@ func TestReschedule_UngovernedTasksDoNotWaitOnAnotherClassBudget(t *testing.T) {
 			}
 		},
 		timeSource,
-		log.NewTestLogger(),
 		metrics.NoopMetricsHandler,
 	)
 

@@ -10,7 +10,6 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/server/common/clock"
 	"go.temporal.io/server/common/dynamicconfig"
-	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/metrics"
 )
 
@@ -67,7 +66,6 @@ func newTestThrottleStateWithWindow(
 	state := NewThrottleState(
 		func() dynamicconfig.TaskThrottleControllerSettings { return settings },
 		timeSource,
-		log.NewTestLogger(),
 		metrics.NoopMetricsHandler,
 	)
 	return state, timeSource

@@ -257,8 +257,6 @@ func (r *reschedulerImpl) drainClassLocked(
 	pq collection.Queue[rescheduledExecuable],
 	now time.Time,
 ) {
-	metrics.TaskReschedulerClassQueueDepth.With(r.metricsHandler).Record(int64(pq.Len()), r.classTags(key)...)
-
 	for !pq.IsEmpty() {
 		rescheduled := pq.Peek()
 		if rescheduleTime := rescheduled.rescheduleTime; now.Before(rescheduleTime) {
@@ -307,14 +305,6 @@ func (r *reschedulerImpl) drainClassLocked(
 // token lands: waking per token means one task per pass, where waiting batches them.
 func (r *reschedulerImpl) budgetRetryInterval() time.Duration {
 	return r.throttleState.settings().Window / budgetPollsPerWindow
-}
-
-func (r *reschedulerImpl) classTags(key reschedulerKey) []metrics.Tag {
-	return []metrics.Tag{
-		metrics.NamespaceIDTag(key.NamespaceID),
-		metrics.TaskPriorityTag(key.Priority.String()),
-		metrics.ResourceExhaustedCauseTag(key.Throttle.Cause),
-	}
 }
 
 func (r *reschedulerImpl) cleanupPQ() {

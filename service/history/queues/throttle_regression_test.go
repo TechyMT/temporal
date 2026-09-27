@@ -9,7 +9,6 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/server/common/clock"
 	"go.temporal.io/server/common/dynamicconfig"
-	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/metrics"
 	"go.uber.org/mock/gomock"
 )
@@ -461,7 +460,6 @@ func TestThrottleState_RejectionSurvivesTheFlagGoingOff(t *testing.T) {
 			}
 		},
 		timeSource,
-		log.NewTestLogger(),
 		metrics.NoopMetricsHandler,
 	)
 	key := testKey()
@@ -624,7 +622,6 @@ func TestThrottleState_CeilingIsLive(t *testing.T) {
 			}
 		},
 		timeSource,
-		log.NewTestLogger(),
 		metrics.NoopMetricsHandler,
 	)
 	key := testKey()

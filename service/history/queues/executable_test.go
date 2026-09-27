@@ -1453,7 +1453,6 @@ func (s *executableSuite) newTestThrottleState() *queues.ThrottleState {
 	return queues.NewThrottleState(
 		func() dynamicconfig.TaskThrottleControllerSettings { return settings },
 		s.timeSource,
-		log.NewTestLogger(),
 		metrics.NoopMetricsHandler,
 	)
 }
