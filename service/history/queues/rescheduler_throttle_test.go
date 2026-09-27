@@ -483,7 +483,7 @@ func TestThrottleState_RaisingTheFloorLiftsAClassAlreadyAtIt(t *testing.T) {
 }
 
 // Equal-priority classes take turns leading the pass.
-func TestReschedule_CursorRotatesBetweenEqualClasses(t *testing.T) {
+func TestReschedule_EveryClassIsVisitedInOnePass(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	overrides := defaultThrottleOverrides()
 	state, stateClock := newTestThrottleState(overrides)
@@ -498,17 +498,12 @@ func TestReschedule_CursorRotatesBetweenEqualClasses(t *testing.T) {
 		e.EXPECT().GetNamespaceID().Return(ns).AnyTimes()
 		addThrottled(r, e, now)
 	}
-	require.Len(t, r.keyOrder, 3)
+	require.Equal(t, 3, r.Len())
 
-	scheduler.EXPECT().TrySubmit(gomock.Any()).Return(true).AnyTimes()
-	leaders := make(map[reschedulerKey]bool)
-	for i := 0; i < 3; i++ {
-		r.Lock()
-		leaders[r.visitOrderLocked()[0]] = true
-		r.Unlock()
-		r.reschedule()
-	}
-	require.Len(t, leaders, 3, "every class must get a turn at the head of the pass")
+	scheduler.EXPECT().TrySubmit(gomock.Any()).Return(true).Times(3)
+	r.reschedule()
+
+	require.Zero(t, r.Len(), "no class may be skipped because another sorted ahead of it")
 }
 
 // An ungoverned task must not wait on another class's budget.
@@ -630,10 +625,44 @@ func TestReschedule_NilControllerStillDispatchesClassedWork(t *testing.T) {
 	e := newThrottledExecutable(ctrl, apsKey("ns-1"), true)
 	e.EXPECT().GetNamespaceID().Return("ns-1").AnyTimes()
 	addThrottled(r, e, now)
-	require.NotEqual(t, ThrottleKey{}, r.keyOrder[0].Throttle, "the class key must carry the cause")
+	r.Lock()
+	require.Len(t, r.pqMap, 1)
+	for key := range r.pqMap {
+		require.NotEqual(t, ThrottleKey{}, key.Throttle, "the class key must carry the cause")
+	}
+	r.Unlock()
 
 	scheduler.EXPECT().TrySubmit(gomock.Any()).Return(true).Times(1)
 	require.NotPanics(t, r.reschedule)
 	require.Zero(t, r.Len())
 	require.False(t, e.admitted, "a task the controller never metered must not be marked")
+}
+
+// A priority PriorityOrder does not name must still drain. Without the trailing band its
+// tasks sit in the queue forever, which is how TaskChannelKeyFn returning a zero key hangs.
+func TestReschedule_UnnamedPriorityStillDrains(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	state, stateClock := newTestThrottleState(defaultThrottleOverrides())
+	timeSource := clock.NewEventTimeSource()
+	timeSource.Update(stateClock.Now())
+	now := timeSource.Now()
+
+	unnamed := ctasks.Priority(-1)
+	require.NotContains(t, ctasks.PriorityName, unnamed)
+
+	scheduler := NewMockScheduler(ctrl)
+	scheduler.EXPECT().TaskChannelKeyFn().Return(func(e Executable) TaskChannelKey {
+		return TaskChannelKey{NamespaceID: e.GetNamespaceID(), Priority: unnamed}
+	}).AnyTimes()
+	r := NewRescheduler(scheduler, timeSource, log.NewTestLogger(), metrics.NoopMetricsHandler, state)
+	r.timerGate = &recordingGate{fireCh: make(chan struct{}, 1)}
+
+	e := newThrottledExecutable(ctrl, apsKey("ns-1"), true)
+	e.EXPECT().GetNamespaceID().Return("ns-1").AnyTimes()
+	addThrottled(r, e, now)
+
+	scheduler.EXPECT().TrySubmit(gomock.Any()).Return(true).Times(1)
+	r.reschedule()
+
+	require.Zero(t, r.Len(), "a priority outside PriorityOrder must still be drained")
 }

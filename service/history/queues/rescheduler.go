@@ -3,7 +3,6 @@
 package queues
 
 import (
-	"cmp"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -77,9 +76,6 @@ type (
 
 		sync.Mutex
 		pqMap          map[reschedulerKey]collection.Queue[rescheduledExecuable]
-		keyOrder       []reschedulerKey
-		visitOrder     []reschedulerKey
-		rrCursor       int
 		numExecutables int
 	}
 )
@@ -243,8 +239,13 @@ func (r *reschedulerImpl) reschedule() {
 	metrics.TaskReschedulerPendingTasks.With(r.metricsHandler).Record(int64(r.numExecutables))
 	pass := reschedulePass{now: r.timeSource.Now()}
 
-	for _, key := range r.visitOrderLocked() {
-		if pq, ok := r.pqMap[key]; ok && !pq.IsEmpty() {
+	// One pass per priority band, most urgent first. Inside a band the map's order decides,
+	// and that differs from pass to pass, so classes of equal priority take turns.
+	for band := 0; band < numPriorityBands; band++ {
+		for key, pq := range r.pqMap {
+			if priorityBand(key.Priority) != band || pq.IsEmpty() {
+				continue
+			}
 			r.drainClassLocked(key, pq, &pass)
 		}
 	}
@@ -254,20 +255,15 @@ func (r *reschedulerImpl) reschedule() {
 	}
 }
 
-func (r *reschedulerImpl) visitOrderLocked() []reschedulerKey {
-	n := len(r.keyOrder)
-	r.visitOrder = r.visitOrder[:0]
-	for i := 0; i < n; i++ {
-		r.visitOrder = append(r.visitOrder, r.keyOrder[(r.rrCursor+i)%n])
+// One band per named priority, plus a last one so a priority nobody named still drains
+// instead of sticking in its queue forever.
+var numPriorityBands = len(ctasks.PriorityOrder) + 1
+
+func priorityBand(p ctasks.Priority) int {
+	if band := slices.Index(ctasks.PriorityOrder, p); band >= 0 {
+		return band
 	}
-	if n > 0 {
-		r.rrCursor = (r.rrCursor + 1) % n
-	}
-	// Lower Priority sorts first. Stable, so the rotation still breaks ties within one priority.
-	slices.SortStableFunc(r.visitOrder, func(a, b reschedulerKey) int {
-		return cmp.Compare(a.Priority, b.Priority)
-	})
-	return r.visitOrder
+	return len(ctasks.PriorityOrder) // unnamed, so after every named band
 }
 
 func (r *reschedulerImpl) drainClassLocked(
@@ -351,7 +347,6 @@ func (r *reschedulerImpl) cleanupPQ() {
 			delete(r.pqMap, key)
 		}
 	}
-	r.rebuildKeyOrderLocked()
 }
 
 func (r *reschedulerImpl) drain() {
@@ -364,26 +359,7 @@ func (r *reschedulerImpl) drain() {
 		}
 		delete(r.pqMap, key)
 	}
-	r.keyOrder = nil
-	r.rrCursor = 0
-
 	r.numExecutables = 0
-}
-
-func (r *reschedulerImpl) rebuildKeyOrderLocked() {
-	if len(r.keyOrder) == len(r.pqMap) {
-		return
-	}
-	order := r.keyOrder[:0]
-	for _, key := range r.keyOrder {
-		if _, ok := r.pqMap[key]; ok {
-			order = append(order, key)
-		}
-	}
-	r.keyOrder = order
-	if len(r.keyOrder) == 0 {
-		r.rrCursor = 0
-	}
 }
 
 func (r *reschedulerImpl) isStopped() bool {
@@ -399,7 +375,6 @@ func (r *reschedulerImpl) getOrCreateClassLocked(
 
 	pq := r.newPriorityQueue(nil)
 	r.pqMap[key] = pq
-	r.keyOrder = append(r.keyOrder, key)
 	return pq
 }
 
