@@ -102,14 +102,14 @@ func (s *ThrottleState) Enabled() bool {
 	return s != nil && s.settings().Enabled
 }
 
-func (s *ThrottleState) Admit(key ThrottleKey) (allowed, metered bool, retryAfter time.Duration) {
+func (s *ThrottleState) Admit(key ThrottleKey) (allowed, metered bool) {
 	if !s.Enabled() {
-		return true, false, 0
+		return true, false
 	}
 	entry := s.getOrCreate(key)
 	if entry == nil {
 		metrics.TaskThrottleGateAdmitted.With(s.metricsHandler).Record(1, key.cappedTags()...)
-		return true, false, 0
+		return true, false
 	}
 
 	now := s.timeSource.Now()
@@ -123,13 +123,13 @@ func (s *ThrottleState) Admit(key ThrottleKey) (allowed, metered bool, retryAfte
 	if entry.tokens < 1 {
 		entry.suppressions++
 		metrics.TaskThrottleGateSuppressed.With(s.metricsHandler).Record(1, key.metricsTags()...)
-		return false, false, entry.tokenETALocked()
+		return false, false
 	}
 
 	entry.tokens--
 	entry.releases++
 	metrics.TaskThrottleGateAdmitted.With(s.metricsHandler).Record(1, key.metricsTags()...)
-	return true, true, 0
+	return true, true
 }
 
 // Return takes back a release the scheduler refused. It never reached the enforcer, so
@@ -253,18 +253,6 @@ func (e *throttleEntry) refillLocked(now time.Time, window time.Duration) {
 
 func (e *throttleEntry) burstLocked(window time.Duration) float64 {
 	return max(1, e.rate*window.Seconds())
-}
-
-func (e *throttleEntry) tokenETALocked() time.Duration {
-	deficit := 1 - e.tokens
-	if deficit <= 0 || e.rate <= 0 {
-		return 0
-	}
-	seconds := deficit / e.rate
-	if seconds > math.MaxInt64/float64(time.Second) {
-		return 0
-	}
-	return time.Duration(seconds * float64(time.Second))
 }
 
 func (s *ThrottleState) clamp(rate float64) float64 {

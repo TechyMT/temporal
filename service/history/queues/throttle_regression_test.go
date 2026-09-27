@@ -20,7 +20,7 @@ func TestThrottleState_FailedSubmitAfterWindowDoesNotIncreaseRate(t *testing.T) 
 	state, timeSource := newTestThrottleState(o)
 	key := testKey()
 
-	allowed, _, _ := state.Admit(key)
+	allowed, _ := state.Admit(key)
 	require.True(t, allowed)
 	timeSource.Update(timeSource.Now().Add(testThrottleWindow))
 	state.Return(key)
@@ -32,7 +32,7 @@ func TestThrottleState_FailedSubmitAfterWindowDoesNotIncreaseRate(t *testing.T) 
 func TestThrottleState_SuccessfulSubmitCommitsRelease(t *testing.T) {
 	state, _ := newTestThrottleState(defaultThrottleOverrides())
 	key := testKey()
-	allowed, metered, _ := state.Admit(key)
+	allowed, metered := state.Admit(key)
 	require.True(t, allowed)
 	require.True(t, metered, "the gate tracked this release")
 
@@ -45,7 +45,7 @@ func TestThrottleState_FailedSubmitRefundsWithoutRelease(t *testing.T) {
 	o.initialRate = 1
 	state, _ := newTestThrottleState(o)
 	key := testKey()
-	allowed, _, _ := state.Admit(key)
+	allowed, _ := state.Admit(key)
 	require.True(t, allowed)
 
 	state.Return(key)
@@ -60,7 +60,7 @@ func TestThrottleState_RejectionAfterEvictionChargesTheCurrentEntry(t *testing.T
 	o.keyTTL = time.Second
 	state, timeSource := newTestThrottleState(o)
 	key := testKey()
-	allowed, metered, _ := state.Admit(key)
+	allowed, metered := state.Admit(key)
 	require.True(t, allowed)
 
 	timeSource.Update(timeSource.Now().Add(2 * o.keyTTL))
@@ -75,31 +75,13 @@ func TestThrottleState_RejectionAfterEvictionChargesTheCurrentEntry(t *testing.T
 	require.Equal(t, int64(1), current.rejections)
 }
 
-func TestThrottleState_DeniedAdmitReportsTokenETA(t *testing.T) {
-	o := defaultThrottleOverrides()
-	o.initialRate = 4
-	state, _ := newTestThrottleState(o)
-	key := testKey()
-
-	for range 4 {
-		allowed, _, retryAfter := state.Admit(key)
-		require.True(t, allowed)
-		require.Zero(t, retryAfter)
-	}
-
-	allowed, metered, retryAfter := state.Admit(key)
-	require.False(t, allowed)
-	require.False(t, metered)
-	require.Equal(t, 250*time.Millisecond, retryAfter)
-}
-
 func TestThrottleState_FailOpenAdmitHasNoPermit(t *testing.T) {
 	o := defaultThrottleOverrides()
 	o.maxKeys = 1
 	state, _ := newTestThrottleState(o)
 
 	require.True(t, admitOK(state, apsKey("tracked")))
-	allowed, metered, _ := state.Admit(apsKey("overflow"))
+	allowed, metered := state.Admit(apsKey("overflow"))
 	require.True(t, allowed, "past the cap the gate fails open")
 	require.False(t, metered, "but it tracked nothing, so a rejection is not evidence")
 }
@@ -162,7 +144,7 @@ func TestThrottleState_IndependentInstancesConvergeOnSharedBudget(t *testing.T) 
 		total := 0
 		for i, state := range states {
 			for range offered[i] {
-				allowed, _, _ := state.Admit(key)
+				allowed, _ := state.Admit(key)
 				if !allowed {
 					continue
 				}
@@ -258,20 +240,13 @@ func TestThrottleState_ThrottledWindowDoesNotIncrease(t *testing.T) {
 	key := testKey()
 	lossThreshold := state.settings().LossThreshold
 	for i := int64(0); i < minDecisionReleases(lossThreshold); i++ {
-		allowed, metered, _ := state.Admit(key)
+		allowed, metered := state.Admit(key)
 		require.True(t, allowed)
 		state.ReportThrottled(key, metered)
 	}
 	closeWindow(state, timeSource, key)
 
 	require.InEpsilon(t, 85.0, throttleRate(state, key), 1e-9)
-}
-
-func TestThrottleEntry_NonPositiveRateHasNoTokenETA(t *testing.T) {
-	for _, rate := range []float64{0, -1, math.SmallestNonzeroFloat64} {
-		entry := throttleEntry{rate: rate}
-		require.Zero(t, entry.tokenETALocked())
-	}
 }
 
 // A class is only asking for a higher rate when the gate refuses it. Raising the rate of a
@@ -333,7 +308,7 @@ func TestThrottleState_RejectionUnderAnotherCauseChargesTheIssuingClass(t *testi
 	issuing := NewThrottleKey(enumspb.RESOURCE_EXHAUSTED_CAUSE_APS_LIMIT, "ns-1")
 	other := NewThrottleKey(enumspb.RESOURCE_EXHAUSTED_CAUSE_PERSISTENCE_LIMIT, "ns-1")
 
-	allowed, metered, _ := state.Admit(issuing)
+	allowed, metered := state.Admit(issuing)
 	require.True(t, allowed)
 	// The executable charges the class that issued the release, not the cause reported.
 	require.True(t, metered)
@@ -362,7 +337,7 @@ func TestThrottleState_ConvergesOnTheShareLeftByOtherTraffic(t *testing.T) {
 		for w := 0; w < 400; w++ {
 			admitted := 0
 			for {
-				allowed, _, _ := state.Admit(key)
+				allowed, _ := state.Admit(key)
 				if !allowed {
 					break
 				}
@@ -494,7 +469,7 @@ func TestThrottleState_RejectionSurvivesTheFlagGoingOff(t *testing.T) {
 	lossThreshold := state.settings().LossThreshold
 	samples := minDecisionReleases(lossThreshold)
 	for i := int64(0); i < samples; i++ {
-		allowed, _, _ := state.Admit(key)
+		allowed, _ := state.Admit(key)
 		require.True(t, allowed)
 	}
 
@@ -577,7 +552,7 @@ func TestThrottleState_CompetingTrafficAboveTheBudgetPinsTheClassAtTheFloor(t *t
 		for w := 0; w < 400; w++ {
 			admitted := 0
 			for {
-				allowed, _, _ := state.Admit(key)
+				allowed, _ := state.Admit(key)
 				if !allowed {
 					break
 				}
@@ -683,7 +658,7 @@ func TestThrottleState_FailuresOutsideTheBudgetDoNotSlowTheClass(t *testing.T) {
 		issued := 0
 		for w := 0; w < 120; w++ {
 			for {
-				allowed, metered, _ := state.Admit(key)
+				allowed, metered := state.Admit(key)
 				if !allowed {
 					break
 				}

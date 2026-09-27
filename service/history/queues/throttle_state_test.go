@@ -146,7 +146,7 @@ func testKey() ThrottleKey {
 }
 
 func admitOK(c *ThrottleState, key ThrottleKey) bool {
-	allowed, _, _ := c.Admit(key)
+	allowed, _ := c.Admit(key)
 	return allowed
 }
 
@@ -173,7 +173,7 @@ func reportThrottle(c *ThrottleState, key ThrottleKey, admitted bool) {
 
 // One metered release and its rejection: the pair the control law measures.
 func admitAndReject(c *ThrottleState, key ThrottleKey) bool {
-	allowed, metered, _ := c.Admit(key)
+	allowed, metered := c.Admit(key)
 	if !allowed {
 		return false
 	}

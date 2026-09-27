@@ -27,16 +27,17 @@ const (
 	reschedulerPQCleanupDuration          = 3 * time.Minute
 	reschedulerPQCleanupJitterCoefficient = 0.15
 
-	budgetRetryJitterCoefficient = 0.5
+	// How often a class blocked on its budget looks again, per control window.
+	budgetPollsPerWindow = 10
 )
 
 type (
 	// Rescheduler buffers task executables that are failed to process and
 	// resubmit them to the task scheduler when the Reschedule method is called.
 	Rescheduler interface {
-		// Add task executable to the rescheduler. throttle is the budget it is waiting on, or
-		// the zero key when the controller does not pace it.
-		Add(task Executable, rescheduleTime time.Time, throttle ThrottleKey)
+		// Add task executable to the rescheduler. throttleKey is the budget it is waiting on,
+		// or the zero key when the controller does not pace it.
+		Add(task Executable, rescheduleTime time.Time, throttleKey ThrottleKey)
 
 		// Reschedule triggers an immediate reschedule for provided namespace
 		// ignoring executable's reschedule time.
@@ -133,9 +134,9 @@ func (r *reschedulerImpl) Stop() {
 func (r *reschedulerImpl) Add(
 	executable Executable,
 	rescheduleTime time.Time,
-	throttle ThrottleKey,
+	throttleKey ThrottleKey,
 ) {
-	key := reschedulerKey{TaskChannelKey: r.taskChannelKeyFn(executable), Throttle: throttle}
+	key := reschedulerKey{TaskChannelKey: r.taskChannelKeyFn(executable), Throttle: throttleKey}
 
 	r.Lock()
 	pq := r.getOrCreateClassLocked(key)
@@ -221,23 +222,12 @@ func (r *reschedulerImpl) rescheduleLoop() {
 
 }
 
-type reschedulePass struct {
-	now      time.Time
-	nextWake time.Time
-}
-
-func (p *reschedulePass) wakeAt(t time.Time) {
-	if p.nextWake.IsZero() || t.Before(p.nextWake) {
-		p.nextWake = t
-	}
-}
-
 func (r *reschedulerImpl) reschedule() {
 	r.Lock()
 	defer r.Unlock()
 
 	metrics.TaskReschedulerPendingTasks.With(r.metricsHandler).Record(int64(r.numExecutables))
-	pass := reschedulePass{now: r.timeSource.Now()}
+	now := r.timeSource.Now()
 
 	// One pass per priority band, most urgent first. Inside a band the map's order decides,
 	// and that differs from pass to pass, so classes of equal priority take turns.
@@ -246,12 +236,8 @@ func (r *reschedulerImpl) reschedule() {
 			if priorityBand(key.Priority) != band || pq.IsEmpty() {
 				continue
 			}
-			r.drainClassLocked(key, pq, &pass)
+			r.drainClassLocked(key, pq, now)
 		}
-	}
-
-	if !pass.nextWake.IsZero() {
-		r.timerGate.Update(pass.nextWake)
 	}
 }
 
@@ -269,14 +255,14 @@ func priorityBand(p ctasks.Priority) int {
 func (r *reschedulerImpl) drainClassLocked(
 	key reschedulerKey,
 	pq collection.Queue[rescheduledExecuable],
-	pass *reschedulePass,
+	now time.Time,
 ) {
 	metrics.TaskReschedulerClassQueueDepth.With(r.metricsHandler).Record(int64(pq.Len()), r.classTags(key)...)
 
 	for !pq.IsEmpty() {
 		rescheduled := pq.Peek()
-		if rescheduleTime := rescheduled.rescheduleTime; pass.now.Before(rescheduleTime) {
-			pass.wakeAt(rescheduleTime)
+		if rescheduleTime := rescheduled.rescheduleTime; now.Before(rescheduleTime) {
+			r.timerGate.Update(rescheduleTime)
 			return
 		}
 
@@ -289,15 +275,15 @@ func (r *reschedulerImpl) drainClassLocked(
 
 		metered := false
 		if key.Throttle != (ThrottleKey{}) {
-			allowed, admitted, retryAfter := r.throttleState.Admit(key.Throttle)
+			allowed, admitted := r.throttleState.Admit(key.Throttle)
 			if !allowed {
-				pass.wakeAt(pass.now.Add(r.budgetRetryInterval(retryAfter)))
+				r.timerGate.Update(now.Add(r.budgetRetryInterval()))
 				return
 			}
 			metered = admitted
 		}
 
-		executable.SetScheduledTime(pass.now)
+		executable.SetScheduledTime(now)
 		if metered {
 			// Mark before submitting: a worker can reach HandleErr before TrySubmit returns.
 			executable.SetThrottleAdmitted(true)
@@ -307,7 +293,7 @@ func (r *reschedulerImpl) drainClassLocked(
 				executable.SetThrottleAdmitted(false)
 				r.throttleState.Return(key.Throttle)
 			}
-			pass.wakeAt(pass.now.Add(
+			r.timerGate.Update(now.Add(
 				backoff.Jitter(taskChanFullBackoff, taskChanFullBackoffJitterCoefficient)))
 			return
 		}
@@ -317,17 +303,10 @@ func (r *reschedulerImpl) drainClassLocked(
 	}
 }
 
-// The floor stops every shard polling at the bucket's refill rate, and the jitter stops them
-// all polling on the same tick.
-func (r *reschedulerImpl) budgetRetryInterval(eta time.Duration) time.Duration {
-	const budgetRetryDivisor = 10
-
-	window := r.throttleState.settings().Window
-	interval := min(max(eta, window/budgetRetryDivisor), window)
-	// Re-capped after jittering: a blocked class still has to look again within the window
-	// that may have changed its rate.
-	jittered := min(backoff.Jitter(interval, budgetRetryJitterCoefficient), window)
-	return max(jittered, time.Millisecond)
+// How long a class blocked on its budget waits. Fixed rather than derived from when the next
+// token lands: waking per token means one task per pass, where waiting batches them.
+func (r *reschedulerImpl) budgetRetryInterval() time.Duration {
+	return r.throttleState.settings().Window / budgetPollsPerWindow
 }
 
 func (r *reschedulerImpl) classTags(key reschedulerKey) []metrics.Tag {

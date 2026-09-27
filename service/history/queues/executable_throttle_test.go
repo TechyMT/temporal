@@ -37,7 +37,7 @@ func TestExecutable_RejectionUnderAnotherBudgetChargesTheIssuingClass(t *testing
 	require.Equal(t, issuing, e.throttleKey)
 
 	// ...and the rescheduler then releases it from that class.
-	allowed, _, _ := state.Admit(issuing)
+	allowed, _ := state.Admit(issuing)
 	require.True(t, allowed)
 	e.SetThrottleAdmitted(true)
 
@@ -65,7 +65,7 @@ func TestExecutable_BusyWorkflowDoesNotChargeTheIssuingClass(t *testing.T) {
 	require.Equal(t, issuing, e.throttleKey)
 
 	// ...and the rescheduler then releases it from that class.
-	allowed, _, _ := state.Admit(issuing)
+	allowed, _ := state.Admit(issuing)
 	require.True(t, allowed)
 	e.SetThrottleAdmitted(true)
 
@@ -125,7 +125,7 @@ func TestExecutable_BusyWorkflowIsNeverChargedWhateverTheFlagSays(t *testing.T) 
 		e := newThrottleTestExecutable(ctrl, state)
 
 		issuing := NewThrottleKey(enumspb.RESOURCE_EXHAUSTED_CAUSE_APS_LIMIT, "ns-1")
-		allowed, _, _ := state.Admit(issuing)
+		allowed, _ := state.Admit(issuing)
 		require.True(t, allowed)
 		e.SetThrottleAdmitted(true)
 

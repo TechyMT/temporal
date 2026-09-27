@@ -121,7 +121,9 @@ type TaskThrottleControllerSettings struct {
 	// rate decreases. It also sizes the evidence gate: a window decides nothing until it has
 	// seen 1/LossThreshold releases.
 	LossThreshold float64
-	// Window is the control window over which loss is evaluated.
+	// Window is the control window over which loss is evaluated. Keep it at a second or more:
+	// a blocked budget looks again every tenth of a window, so a shorter one polls harder, and
+	// at zero it polls without pausing at all.
 	Window time.Duration
 	// MaxKeys caps the budgets tracked by a host. Past the cap the controller fails open.
 	MaxKeys int

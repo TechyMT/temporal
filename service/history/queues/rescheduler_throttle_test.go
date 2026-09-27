@@ -159,7 +159,7 @@ func TestReschedule_BudgetIsCeilingNotQuota(t *testing.T) {
 		"a not-due head must not reach the gate at all, so the class is not even created")
 }
 
-func TestReschedule_SingleTimerGateUpdatePerPass(t *testing.T) {
+func TestReschedule_EveryPendingClassArmsAWake(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	state, stateClock := newTestThrottleState(defaultThrottleOverrides())
 
@@ -180,8 +180,11 @@ func TestReschedule_SingleTimerGateUpdatePerPass(t *testing.T) {
 	gate.updates = nil
 	r.reschedule()
 
-	require.Len(t, gate.updates, 1)
-	require.Equal(t, now.Add(time.Minute), gate.updates[0], "wake at the running minimum")
+	require.Len(t, gate.updates, 3, "each class that is not due yet arms its own wake")
+	for _, delay := range []time.Duration{time.Minute, 3 * time.Minute, 5 * time.Minute} {
+		require.Contains(t, gate.updates, now.Add(delay),
+			"a class must not be left parked with no wake; the gate keeps the earliest")
+	}
 }
 
 func TestReschedule_BudgetDeniedWakesInsideControlWindow(t *testing.T) {
@@ -217,30 +220,20 @@ func TestReschedule_BudgetDeniedWakesInsideControlWindow(t *testing.T) {
 		"the wake must land inside the control window that may change the rate")
 }
 
-func TestReschedule_BudgetRetryIntervalOnlyWaitsLonger(t *testing.T) {
+// A blocked class looks again a fixed number of times per window, whatever its rate.
+func TestReschedule_BudgetRetryIntervalIsAFractionOfTheWindow(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		window time.Duration
-		eta    time.Duration
-		base   time.Duration
+		want   time.Duration
 	}{
-		{name: "fallback", window: time.Second, base: 100 * time.Millisecond},
-		{name: "longer estimate", window: time.Second, eta: 400 * time.Millisecond, base: 400 * time.Millisecond},
-		{name: "short estimate", window: time.Second, eta: 40 * time.Millisecond, base: 100 * time.Millisecond},
-		{name: "window cap", window: time.Second, eta: 30 * time.Second, base: time.Second},
+		{name: "default window", window: time.Second, want: 100 * time.Millisecond},
+		{name: "long window", window: 10 * time.Second, want: time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			state, _ := newTestThrottleStateWithWindow(defaultThrottleOverrides(), tc.window)
 			r := reschedulerImpl{throttleState: state}
-
-			seen := make(map[time.Duration]struct{})
-			for i := 0; i < 64; i++ {
-				got := r.budgetRetryInterval(tc.eta)
-				require.GreaterOrEqual(t, got, tc.base/2, "jitter must not halve the wait twice over")
-				require.LessOrEqual(t, got, tc.window, "a blocked class must look again within the window")
-				seen[got] = struct{}{}
-			}
-			require.Greater(t, len(seen), 1, "every shard polling on the same tick is the defect")
+			require.Equal(t, tc.want, r.budgetRetryInterval())
 		})
 	}
 }
